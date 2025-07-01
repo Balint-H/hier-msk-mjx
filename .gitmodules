@@ -1,0 +1,3 @@
+[submodule "myo_sim"]
+	path = myo_sim
+	url = https://github.com/Balint-H/myo_sim.git

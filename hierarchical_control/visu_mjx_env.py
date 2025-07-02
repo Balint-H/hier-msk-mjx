@@ -1,9 +1,8 @@
-import time
 import mujoco
 import jax
 import numpy as np
 import mujoco.viewer
-from playground_hand_hierarchical import MjxHand
+from hierarchical_control.envs.playground_hand_hierarchical import MjxHand
 import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use('qtagg')
@@ -45,7 +44,7 @@ def main():
                                                           xfrc_applied=d.xfrc_applied))
             state = jit_step(state, d.ctrl)
             if VIS_REF_POS:
-                qpos_ref_t = env.get_ref_qpos(state)
+                qpos_ref_t = env.get_ref_qpos(state.info)
                 d.qpos = qpos_ref_t
                 assert all([low<=q<=high for (low, high), q in zip(m.jnt_range, d.qpos)])
             else:

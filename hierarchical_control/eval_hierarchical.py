@@ -1,21 +1,17 @@
-from typing import Dict, Tuple
+from typing import Dict
 
 import jax
 import mujoco
 import mujoco.viewer as viewer
-import numpy as np
 from brax.training.acme.running_statistics import normalize
 from brax.training.agents.ppo import networks as ppo_networks
 from brax.io import model
-from functools import partial
 import jax.numpy as jp
-from mujoco.mjx._src import sensor
-from ml_collections.config_dict import config_dict
 
 from mujoco import mjx
 
-from hierarchical_env import make_ll_network
-from playground_hand_hierarchical import MjxHand, default_config
+from hierarchical_control.envs.hierarchical_env import make_ll_network
+from hierarchical_control.envs.playground_hand_hierarchical import MjxHand, default_config
 
 
 def _get_hl_obs(data: mjx.Data, info: Dict) -> jp.ndarray:
@@ -58,7 +54,7 @@ ll_network = make_ll_network(
       preprocess_observations_fn=normalize,
       obs_key='ll_obs')
 
-model_path = './playground_params.pickle'
+model_path = 'playground_params.pickle'
 hl_params, ll_params = model.load_params(model_path)
 del hl_params[0].mean['ll_obs']
 del hl_params[0].std['ll_obs']

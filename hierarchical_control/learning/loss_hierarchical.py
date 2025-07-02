@@ -4,7 +4,7 @@ import jax
 import optax
 from jax import numpy as jnp
 from brax.training.types import Params, Metrics
-from train_hierarchical import LLSupervisedData
+from hierarchical_control.learning.train_hierarchical import LLSupervisedData
 from brax.training.networks import FeedForwardNetwork
 from mujoco import mjx
 

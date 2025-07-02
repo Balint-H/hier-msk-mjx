@@ -51,9 +51,11 @@ class LLSupervisedData(NamedTuple):
   ll_obs: Dict[str, jp.ndarray]
   activation_designated: jp.ndarray  # Could be different from logits e.g., stochastic
   hl_desired_torque: jp.ndarray
-  torque_designated: jp.ndarray
   # Pre-computed Jacobian: d(torque)/d(act)
-  jacobian: jp.ndarray
+  jacobian: Optional[jp.ndarray] = None
+  torque_designated: Optional[jp.ndarray] = None
+  qpos: Optional[jp.ndarray] = None
+  qvel: Optional[jp.ndarray] = None
 
 
 class HierarchicalBraxDomainRandomizationVmapWrapper(BraxDomainRandomizationVmapWrapper):

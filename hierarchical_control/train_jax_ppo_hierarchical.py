@@ -29,15 +29,13 @@ import optax
 from absl import app
 from absl import flags
 from absl import logging
-from brax.training import networks
 from brax.training.agents.ppo import networks as ppo_networks
-import train_hierarchical as hierarchical_ppo
-from train_hierarchical import PPOLearningParams
+from hierarchical_control.learning import train_hierarchical as hierarchical_ppo
+from hierarchical_control.acting import acting_hierarchical, acting_hierarchical_autodiff
+from hierarchical_control.learning.train_hierarchical import PPOLearningParams
 from etils import epath
 from flax.training import orbax_utils
 
-
-import jax.numpy as jp
 from ml_collections import config_dict
 from orbax import checkpoint as ocp
 from tensorboardX import SummaryWriter
@@ -45,18 +43,20 @@ import wandb
 
 import mujoco_playground
 from mujoco_playground import registry
-from hierarchical_env import wrap_for_hierarchical_brax_training, make_ll_inference_fn, make_ll_network
+from hierarchical_control.envs.hierarchical_env import wrap_for_hierarchical_brax_training, make_ll_inference_fn, make_ll_network
 from mujoco_playground.config import dm_control_suite_params
 from mujoco_playground.config import locomotion_params
 from mujoco_playground.config import manipulation_params
 
-from playground_hand_hierarchical import MjxHand, default_config
-from loss_hierarchical import hierarchical_ll_loss_l2
+from hierarchical_control.envs.playground_hand_hierarchical import MjxHand, default_config
+from hierarchical_control.learning.loss_hierarchical import hierarchical_ll_loss_l2
+from hierarchical_control.learning.loss_hierarchical_autodiff import hierarchical_ll_loss_l2 as autodiff_loss
 
 # xla_flags = os.environ.get("XLA_FLAGS", "")
 # xla_flags += " --xla_gpu_triton_gemm_any=True"
 # os.environ["XLA_FLAGS"] = xla_flags
 # os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".85"
 os.environ["MUJOCO_GL"] = "egl"
 
 # Ignore the info logs from brax
@@ -71,7 +71,8 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, module="jax")
 # Suppress UserWarnings from absl (used by JAX and TensorFlow)
 warnings.filterwarnings("ignore", category=UserWarning, module="absl")
 
-
+_USE_AUTODIFF = flags.DEFINE_boolean("use_autodiff", False,
+                                     "Use jax autodiff for loss or analytical jacobian")
 _ENV_NAME = flags.DEFINE_string(
     "env_name",
     "LeapCubeReorient",
@@ -336,7 +337,10 @@ def main(argv):
       make_ll_inference_fn=make_ll_inference_fn,
       hl_network_factory=hl_network_factory,
       ll_network_factory=ll_network_factory,
-      ll_loss_fn=functools.partial(hierarchical_ll_loss_l2, l2_reg=0.01),
+      ll_loss_fn=functools.partial((hierarchical_ll_loss_l2
+                                    if not _USE_AUTODIFF.value else functools.partial(autodiff_loss,
+                                                                                      model=env.mjx_model)),
+                                   l2_reg=0.01),
       hl_policy_params_fn=functools.partial(policy_params_fn, suffix="_hl"),
       ll_policy_params_fn=functools.partial(policy_params_fn, suffix="_ll"),
       seed=_SEED.value,
@@ -344,6 +348,10 @@ def main(argv):
       ll_restore_checkpoint_path=restore_checkpoint_path+"_ll" if restore_checkpoint_path is not None else None,
       wrap_env_fn=wrap_for_hierarchical_brax_training,
       num_eval_envs=num_eval_envs,
+      unroll_function=(acting_hierarchical.generate_unroll
+                       if not _USE_AUTODIFF.value else acting_hierarchical_autodiff.generate_unroll),
+      evaluator_cls=(acting_hierarchical.Evaluator
+                       if not _USE_AUTODIFF.value else acting_hierarchical_autodiff.Evaluator)
   )
 
   times = [time.monotonic()]

@@ -6,7 +6,7 @@ from ml_collections import config_dict
 import mujoco
 from mujoco import mjx
 from mujoco_playground import State
-from hierarchical_env import HierarchicalEnv, LLSupervisedData
+from hierarchical_control.envs.hierarchical_env import HierarchicalEnv, LLSupervisedData
 from mujoco_playground._src import mjx_env
 
 
@@ -14,11 +14,10 @@ def default_config() -> config_dict.ConfigDict:
   env_config = config_dict.create(
     ctrl_dt=0.008,
     sim_dt=0.004,
-    episode_length=3000,
-    f=0.5,
+    episode_length=2000,
     history_len=1,  # TODO
     noise_config=config_dict.create(
-      reset_noise_scale=0e-1,
+      reset_noise_scale=1e-3,
     ),
     reward_config=config_dict.create(
       angle_reward_weight=1,
@@ -33,7 +32,7 @@ def default_config() -> config_dict.ConfigDict:
   )
 
   rl_config = config_dict.create(
-    num_timesteps=100_000_000,
+    num_timesteps=200_000_000,
     num_evals=10,
     episode_length=env_config.episode_length,
     hl_ppo_learning_config=config_dict.create(
@@ -46,9 +45,9 @@ def default_config() -> config_dict.ConfigDict:
       max_grad_norm=1.0,
     ),
     normalize_observations=True,
-    unroll_length=30,
+    unroll_length=32,
     num_minibatches=64,
-    num_updates_per_batch=2,
+    num_updates_per_batch=1,
     num_resets_per_eval=1,
     num_envs=8192//4,
     batch_size=256//4,
@@ -73,7 +72,7 @@ def default_config() -> config_dict.ConfigDict:
 
 
 class MjxHand(HierarchicalEnv):
-  """Hierarchical elbow environment with internal PD + HL modulation."""
+  """Hierarchical hand environment with internal PD + HL modulation."""
 
   FINGER_JOINTS = {"thumb": ['mp', 'ip'],
                    "index": ['2'],
@@ -99,18 +98,18 @@ class MjxHand(HierarchicalEnv):
     if reference_trajectory:
       self._qpos_ref, self._qvel_ref = reference_trajectory
     else:
-      self._qpos_ref, self._qvel_ref = self._generate_placeholder_trajectory(ctrl_dt=self.sim_dt, order=jp.arange(5) + 1)
+      self._qpos_ref, self._qvel_ref = self._generate_normalized_trajectory(ctrl_dt=self.sim_dt, order=jp.arange(5) + 1)
       self._idx = jp.array([int(np.where([i in v for v in self.flexion_joint_ids.values()])[0][0]) for i in self.flat_ref_ids])
       self._scales = np.concat([[jp.diff(self.mjx_model.jnt_range[i])[0] / 2 for i in v]
-                          for v in self.flexion_joint_ids.values()])
+                                 for v in self.flexion_joint_ids.values()])
+      self._scale = jp.array(self._scales)
       self._offsets = np.concat([[jp.sum(self.mjx_model.jnt_range[i]) / 2 for i in v]
                            for v in self.flexion_joint_ids.values()])
+      self._offsets = jp.array(self._offsets)
 
     self._ref_traj_len = self._qpos_ref.shape[0]
     self.kp = self._config.pd_gains.kp
     self.kd = self._config.pd_gains.kd
-    # self.flexion_qposadr = jp.concatenate([self.mj_model.joint(i).qposadr for i in self.flexion_joint_ids])
-    # self.flexion_dofadr = jp.concatenate([self.mj_model.joint(i).dofadr for i in self.flexion_joint_ids])
 
   def preprocess_spec(self, spec: mujoco.MjSpec):
     spec = super().preprocess_spec(spec)
@@ -144,13 +143,13 @@ class MjxHand(HierarchicalEnv):
 
     return spec
 
-  def _generate_placeholder_trajectory(self,
-                                       ctrl_dt=0.001,
-                                       n_freqs=5,
-                                       base_freq=0.02,
-                                       amplitudes=(0.8, 0.8, 0.8, 0.8, 0.8),
-                                       offsets=(0,),
-                                       order=None) -> Tuple[jp.ndarray, jp.ndarray]:
+  def _generate_normalized_trajectory(self,
+                                      ctrl_dt=0.001,
+                                      n_freqs=5,
+                                      base_freq=0.02,
+                                      amplitudes=(0.8, 0.8, 0.8, 0.8, 0.8),
+                                      offsets=(0,),
+                                      order=None) -> Tuple[jp.ndarray, jp.ndarray]:
     frequencies = (jp.arange(n_freqs) + 1 if order is None else order) * base_freq
     offsets = jp.array(offsets)
     amplitudes = jp.array(amplitudes)
@@ -164,21 +163,6 @@ class MjxHand(HierarchicalEnv):
   def reset(self, rng: jp.ndarray) -> State:
     """Resets the environment to an initial state."""
     rng_noise, rng_vel, rng_offset, rng_permute = jax.random.split(rng, 4)
-
-    # Initial position/velocity noise
-    low, hi = -self._config.noise_config.reset_noise_scale, self._config.noise_config.reset_noise_scale
-    qpos_noise = jax.random.uniform(rng_noise, (self.mjx_model.nq,), minval=low, maxval=hi)
-
-    qvel_noise = jax.random.uniform(rng_vel, (self.mjx_model.nv,), minval=low, maxval=hi)
-
-    qpos = self.mjx_model.qpos0 + qpos_noise
-    qvel = jp.zeros(self.mjx_model.nv) + qvel_noise  # Start with zero velocity + noise
-
-    # Initial data state
-    data = mjx.make_data(self.mjx_model)
-    data = data.replace(qpos=qpos, qvel=qvel, ctrl=jp.zeros(self.mjx_model.nu),
-                        act=jp.zeros(self.mjx_model.na))  # Reset activation
-    data = mjx.forward(self.mjx_model, data)  # Compute initial derived quantities
 
     # Initial reference trajectory time index
     ref_time_idx = jax.random.randint(rng_offset, shape=(1,),
@@ -198,6 +182,24 @@ class MjxHand(HierarchicalEnv):
       'jac_torque_act': jp.zeros((self.mjx_model.nv, self.mjx_model.na))
     }
 
+    # Initial position/velocity noise
+    low, hi = -self._config.noise_config.reset_noise_scale, self._config.noise_config.reset_noise_scale
+    qpos_noise = jax.random.uniform(rng_noise, (self.mjx_model.nq,), minval=low, maxval=hi)
+
+    qvel_noise = jax.random.uniform(rng_vel, (self.mjx_model.nv,), minval=low, maxval=hi)
+    qpos, qvel = self.get_ref_qpos_qvel(info)  # Start
+    qpos += qpos_noise
+    qvel += qvel_noise
+
+
+    # Initial data state
+    data = mjx.make_data(self.mjx_model)
+    data = data.replace(qpos=qpos, qvel=qvel, ctrl=jp.zeros(self.mjx_model.nu),
+                        act=jp.zeros(self.mjx_model.na))  # Reset activation
+    data = mjx.forward(self.mjx_model, data)  # Compute initial derived quantities
+
+
+
     # Get initial hierarchical observations
     obs = {'hl_obs': self._get_hl_obs(data, info),
            'll_obs': self._get_ll_obs(data, info)
@@ -213,13 +215,13 @@ class MjxHand(HierarchicalEnv):
     return State(data, obs, reward, done, metrics, info)
 
   def hl_step(self, state: State, hl_action: jp.ndarray) -> State:
-    """Calculates desired torque based on HL modulation of PD error."""
+    """Calculate desired torque based on HL modulation of PD error."""
     # hl_action is the HL_modulation signal
     data = state.data
 
     # ref_time was incremented after the last physics step
     # Calculate PD errors for the *next* timestep (used in next high_level_step)
-    qpos_ref_t, qvel_ref_t = self.get_ref_qpos_qvel(state)
+    qpos_ref_t, qvel_ref_t = self.get_ref_qpos_qvel(state.info)
 
     # TODO: handle potential ball joints with quat_sub instead
     raw_pos_error = qpos_ref_t - data.qpos
@@ -232,7 +234,6 @@ class MjxHand(HierarchicalEnv):
     desired_torque = self.kp * modulated_pos_error + self.kd * raw_vel_error
 
     state.info['desired_torque'] = desired_torque
-    # state.info['ref_time_idx'] = ref_time_idx
 
     # Prepare observations for the LL policy
     ll_obs = self._get_ll_obs(data, state.info)
@@ -240,15 +241,15 @@ class MjxHand(HierarchicalEnv):
     return state
 
   def step(self, state: State, action: jp.ndarray) -> State:
-    """Applies LL ctrl action, steps physics, calculates rewards and next state."""
+    """Apply LL ctrl action, steps physics, calculates rewards and next state."""
     data = state.data
-    data = data.replace(act=action)
+    data = data.replace(act=action)  # Having activation dynamics or not?
+
     next_data = mjx_env.step(self.mjx_model, data, action, self.n_substeps)
 
-    actual_torque = next_data.qfrc_actuator  # Torque resulting from LL ctrl
-
-    # Calculate Jacobian d(torque)/d(act) based on the state *before* the step
+    # Calculate Jacobian d(torque)/d(act) based on the state
     jac_torque_act = self.calculate_torque_activation_jacobian(data)
+    actual_torque = next_data.qfrc_actuator  # Torque resulting from LL ctrl
 
     # --- Calculate HL Reward ---
     # TODO axis for sum?
@@ -258,7 +259,7 @@ class MjxHand(HierarchicalEnv):
                  )
 
     state.info['ref_time_idx'] = (state.info['ref_time_idx'] + 1) % self._ref_traj_len
-    qpos_ref_t = self.get_ref_qpos(state)
+    qpos_ref_t = self.get_ref_qpos(state.info)
 
     angle_error = qpos_ref_t - next_data.qpos
     angle_reward = (self._config.reward_config.angle_reward_weight
@@ -301,21 +302,21 @@ class MjxHand(HierarchicalEnv):
     """Get base state observations for the low-level policy (before desired_torque)."""
     # Example: proprioceptive info relevant for muscle control
     return jp.concatenate([
-      data.actuator_length,
-      data.actuator_velocity,
+      data.qpos,
+      data.qvel,
     ])
 
-  def get_ref_qpos_qvel(self, state):
-    t_id = state.info['ref_time_idx']
-    qpos_finger = self._qpos_ref[t_id, state.info['ref_random_idx']][self._idx] * self._scales + self._offsets
-    qvel_finger = self._qvel_ref[t_id, state.info['ref_random_idx']][self._idx] * self._scales
+  def get_ref_qpos_qvel(self, info):
+    t_id = info['ref_time_idx']
+    qpos_finger = self._qpos_ref[t_id, info['ref_random_idx']][self._idx] * self._scales + self._offsets
+    qvel_finger = self._qvel_ref[t_id, info['ref_random_idx']][self._idx] * self._scales
     qpos_ref = jp.zeros(self.mjx_model.nq).at[self.flat_ref_ids].set(qpos_finger)
     qvel_ref = jp.zeros(self.mjx_model.nv).at[self.flat_ref_ids].set(qvel_finger)
     return qpos_ref, qvel_ref
 
-  def get_ref_qpos(self, state):
-    t_id = state.info['ref_time_idx']
-    qpos_finger = self._qpos_ref[t_id, state.info['ref_random_idx']][self._idx] * self._scales + self._offsets
+  def get_ref_qpos(self, info):
+    t_id = info['ref_time_idx']
+    qpos_finger = self._qpos_ref[t_id, info['ref_random_idx']][self._idx] * self._scales + self._offsets
     qpos_ref = jp.zeros(self.mjx_model.nq).at[self.flat_ref_ids].set(qpos_finger)
     return qpos_ref
 
@@ -335,6 +336,15 @@ class MjxHand(HierarchicalEnv):
       group_by='u',
     )
     return gains[None, :] * data.actuator_moment.T
+
+  def autodiff_torque_activation_jacobian(self, data: mjx.Data) -> jp.ndarray:
+    """Calculates d(torque)/d(act) using JAX's automatic differentiation."""
+    def _torque_from_act(act: jp.ndarray) -> jp.ndarray:
+      data_with_new_act = data.replace(act=act)
+      updated_data = mjx.fwd_actuation(self.mjx_model, data_with_new_act)
+      return updated_data.qfrc_actuator
+    jacobian_fn = jax.jacobian(_torque_from_act)
+    return jacobian_fn(data.act)
 
   # --- Properties ---
   @property

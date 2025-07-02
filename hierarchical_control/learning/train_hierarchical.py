@@ -24,7 +24,7 @@ from typing import Any, Callable, Mapping, Optional, Tuple, Union
 from absl import logging
 from brax import base
 from brax import envs
-import acting_hierarchical
+from hierarchical_control.acting import acting_hierarchical
 from brax.training import gradients
 from brax.training import logger as metric_logger
 from brax.training import pmap
@@ -42,7 +42,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-from hierarchical_env import LLSupervisedData
+from hierarchical_control.envs.hierarchical_env import LLSupervisedData
 
 
 InferenceParams = Tuple[running_statistics.NestedMeanStd, Params]
@@ -275,6 +275,8 @@ def train(
     hl_restore_params: Optional[Any] = None,
     ll_restore_params: Optional[Any] = None,
     restore_value_fn: bool = True,
+    unroll_function = acting_hierarchical.generate_unroll,
+    evaluator_cls = acting_hierarchical.Evaluator
     # endregion
 ):
   """PPO training.
@@ -581,7 +583,7 @@ def train(
     def f(carry, unused_t):
       current_state, current_key = carry
       current_key, next_key = jax.random.split(current_key)
-      next_state, hl_data, ll_data = acting_hierarchical.generate_unroll(
+      next_state, hl_data, ll_data = unroll_function(
           env,
           current_state,
           hl_policy,
@@ -807,7 +809,7 @@ def train(
       wrap_env_fn=wrap_env_fn,
       randomization_fn=randomization_fn,
   )
-  evaluator = acting_hierarchical.Evaluator(
+  evaluator = evaluator_cls(
       eval_env,
       functools.partial(make_hl_policy, deterministic=deterministic_eval),
       functools.partial(make_ll_policy, deterministic=deterministic_eval),

@@ -25,7 +25,7 @@ from brax.training.types import PRNGKey
 from brax.training.types import Transition
 import jax
 import numpy as np
-from hierarchical_env import HierarchicalEnv, LLSupervisedData
+from hierarchical_control.envs.hierarchical_env import HierarchicalEnv, LLSupervisedData
 
 State = envs.State
 Env = envs.Env

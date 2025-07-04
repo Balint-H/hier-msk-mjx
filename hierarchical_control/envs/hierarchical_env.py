@@ -49,7 +49,7 @@ class HierarchicalEnv(mjx_env.MjxEnv, abc.ABC):
 class LLSupervisedData(NamedTuple):
   """Data collected for training the low-level supervised policy."""
   ll_obs: Dict[str, jp.ndarray]
-  activation_designated: jp.ndarray  # Could be different from logits e.g., stochastic
+  # activation_designated: jp.ndarray  # Could be different from logits e.g., stochastic
   hl_desired_torque: jp.ndarray
   # Pre-computed Jacobian: d(torque)/d(act)
   jacobian: Optional[jp.ndarray] = None

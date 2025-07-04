@@ -56,7 +56,7 @@ from hierarchical_control.learning.loss_hierarchical_autodiff import hierarchica
 # xla_flags += " --xla_gpu_triton_gemm_any=True"
 # os.environ["XLA_FLAGS"] = xla_flags
 # os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".85"
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".9"
 os.environ["MUJOCO_GL"] = "egl"
 
 # Ignore the info logs from brax

@@ -12,21 +12,21 @@ from mujoco_playground._src import mjx_env
 
 def default_config() -> config_dict.ConfigDict:
   env_config = config_dict.create(
-    ctrl_dt=0.008,
+    ctrl_dt=0.004,
     sim_dt=0.004,
-    episode_length=2000,
+    episode_length=800,
     history_len=1,  # TODO
     noise_config=config_dict.create(
-      reset_noise_scale=1e-3,
+      reset_noise_scale=0e-2,
     ),
     reward_config=config_dict.create(
-      angle_reward_weight=1,
-      angle_reward_scale=5,
-      ctrl_cost_weight=0.5,
+      angle_reward_weight=10,
+      angle_reward_scale=15,
+      ctrl_cost_weight=0.0,
       ctrl_cost_scale=0.001,
     ),
     pd_gains=config_dict.create(
-      kp=4,
+      kp=0.6,
       kd=0
     )
   )
@@ -37,23 +37,23 @@ def default_config() -> config_dict.ConfigDict:
     episode_length=env_config.episode_length,
     hl_ppo_learning_config=config_dict.create(
       reward_scaling=1.0,
-      clipping_epsilon=0.1,
-      learning_rate=1e-6,
-      entropy_cost=0.001,
-      discounting=0.99,
+      clipping_epsilon=0.2,
+      learning_rate=3e-4,
+      entropy_cost=2e-2,
+      discounting=0.98,
       gae_lambda=0.95,
       max_grad_norm=1.0,
     ),
     normalize_observations=True,
-    unroll_length=32,
-    num_minibatches=64,
-    num_updates_per_batch=1,
+    unroll_length=10,
+    num_minibatches=32,
+    num_updates_per_batch=4,
     num_resets_per_eval=1,
-    num_envs=8192//4,
+    num_envs=8192//8,
     batch_size=256//4,
     hl_network_factory=config_dict.create(
-      policy_hidden_layer_sizes=(128, 64, 64, 64),
-      value_hidden_layer_sizes=(128, 64, 64, 64),
+      policy_hidden_layer_sizes=(128, 128, 64),
+      value_hidden_layer_sizes=(128, 128, 64),
       policy_obs_key="hl_obs",
       value_obs_key="hl_obs",
     ),
@@ -63,7 +63,7 @@ def default_config() -> config_dict.ConfigDict:
     ),
     ll_learning_config=config_dict.create(
       ll_opt_max_grad_norm=None,
-      learning_rate=1e-5
+      learning_rate=6e-4
     )
   )
 
@@ -110,6 +110,7 @@ class MjxHand(HierarchicalEnv):
     self._ref_traj_len = self._qpos_ref.shape[0]
     self.kp = self._config.pd_gains.kp
     self.kd = self._config.pd_gains.kd
+    self.n_flex = len(self.flat_ref_ids)
 
   def preprocess_spec(self, spec: mujoco.MjSpec):
     spec = super().preprocess_spec(spec)
@@ -168,7 +169,7 @@ class MjxHand(HierarchicalEnv):
     ref_time_idx = jax.random.randint(rng_offset, shape=(1,),
                                       minval=0, maxval=self._ref_traj_len, dtype=jp.uint16)[0]
 
-    ref_random_idx = jax.random.permutation(rng_permute, jp.arange(5))  # TODO: This is 1DoF joints specific
+    ref_random_idx = jax.random.permutation(rng_permute, jp.arange(5))
 
     # Initial info dictionary
     info = {
@@ -178,7 +179,7 @@ class MjxHand(HierarchicalEnv):
 
       # Placeholders for fields for the LL loss calculation
       'desired_torque': jp.zeros(self.mjx_model.nv),
-      'actual_torque': jp.zeros(self.mjx_model.nv),
+      'designated_torque': jp.zeros(self.mjx_model.nv),
       'jac_torque_act': jp.zeros((self.mjx_model.nv, self.mjx_model.na))
     }
 
@@ -187,10 +188,9 @@ class MjxHand(HierarchicalEnv):
     qpos_noise = jax.random.uniform(rng_noise, (self.mjx_model.nq,), minval=low, maxval=hi)
 
     qvel_noise = jax.random.uniform(rng_vel, (self.mjx_model.nv,), minval=low, maxval=hi)
-    qpos, qvel = self.get_ref_qpos_qvel(info)  # Start
-    qpos += qpos_noise
-    qvel += qvel_noise
-
+    qpos_ref, qvel_ref = self.get_ref_qpos_qvel(info)  # Starting pose from ref
+    qpos = qpos_ref + qpos_noise
+    qvel = qvel_ref + qvel_noise
 
     # Initial data state
     data = mjx.make_data(self.mjx_model)
@@ -198,10 +198,8 @@ class MjxHand(HierarchicalEnv):
                         act=jp.zeros(self.mjx_model.na))  # Reset activation
     data = mjx.forward(self.mjx_model, data)  # Compute initial derived quantities
 
-
-
     # Get initial hierarchical observations
-    obs = {'hl_obs': self._get_hl_obs(data, info),
+    obs = {'hl_obs': self._get_hl_obs(data, {'qpos_ref': qpos_ref, 'qvel_ref': qvel_ref}),
            'll_obs': self._get_ll_obs(data, info)
            }
 
@@ -243,56 +241,58 @@ class MjxHand(HierarchicalEnv):
   def step(self, state: State, action: jp.ndarray) -> State:
     """Apply LL ctrl action, steps physics, calculates rewards and next state."""
     data = state.data
-    data = data.replace(act=action)  # Having activation dynamics or not?
+    data = data.replace(act=action, ctrl=action)  # Having activation dynamics or not?
+    # Calculate Jacobian d(torque)/d(act) based on the state
+    jac_torque_act = self.calculate_torque_activation_jacobian(data)
 
     next_data = mjx_env.step(self.mjx_model, data, action, self.n_substeps)
 
-    # Calculate Jacobian d(torque)/d(act) based on the state
-    jac_torque_act = self.calculate_torque_activation_jacobian(data)
-    actual_torque = next_data.qfrc_actuator  # Torque resulting from LL ctrl
+    # data_no_dyn = mjx.fwd_position(self.mjx_model, data_no_dyn)
+    # data_no_dyn = mjx.fwd_velocity(self.mjx_model, data_no_dyn)
+    # data_no_dyn = mjx.fwd_actuation(self.mjx_model, data_no_dyn)
 
-    # --- Calculate HL Reward ---
-    # TODO axis for sum?
-    ctrl_cost = (self._config.reward_config.ctrl_cost_weight
-                 * jp.sum(jp.square(self._config.reward_config.ctrl_cost_scale * state.info['desired_torque']))
-                 / self.mjx_model.nv
-                 )
+    designated_torque = data.qfrc_actuator  # Torque resulting from LL ctrl
 
     state.info['ref_time_idx'] = (state.info['ref_time_idx'] + 1) % self._ref_traj_len
-    qpos_ref_t = self.get_ref_qpos(state.info)
+    qpos_ref_t, qvel_ref_t = self.get_ref_qpos_qvel(state.info)
 
-    angle_error = qpos_ref_t - next_data.qpos
-    angle_reward = (self._config.reward_config.angle_reward_weight
-                    * jp.exp(-self._config.reward_config.angle_reward_scale
-                             * jp.sum(jp.square(angle_error)) / self.mjx_model.nv))
-    reward = angle_reward - ctrl_cost
+    rewards = self._get_reward(state.info['desired_torque'], next_data.qpos, qpos_ref_t)
 
     # Prepare next observations for HL controller
-    next_info_for_obs = {'ref_qpos': qpos_ref_t}
+    next_info_for_obs = {'ref_qpos': qpos_ref_t, 'ref_qvel': qvel_ref_t}
     state.obs['hl_obs'] = self._get_hl_obs(next_data, next_info_for_obs)
 
     # Update metrics
-    state.metrics['angle_reward'] = angle_reward
-    state.metrics['reward_quadctrl'] = -ctrl_cost
+    state.metrics['angle_reward'] = rewards[0]
 
     # Update info dictionary for the final returned state
-    state.info['actual_torque'] = actual_torque
+    state.info['designated_torque'] = designated_torque
     state.info['jac_torque_act'] = jac_torque_act
 
     # TODO: termination conditions
     done = 0.0
 
-    return state.replace(data=next_data, reward=reward, done=done)
+    return state.replace(data=next_data, reward=rewards[0]+rewards[1], done=done)
+
+  def _get_reward(self, desired_torque, qpos, qpos_ref_t):
+    ctrl_cost = (self._config.reward_config.ctrl_cost_weight
+                 * jp.sum(jp.square(self._config.reward_config.ctrl_cost_scale * desired_torque))
+                 / self.mjx_model.nv
+                 )
+
+    angle_error = (qpos_ref_t - qpos)
+    angle_reward = (self._config.reward_config.angle_reward_weight
+                    * jp.exp(-self._config.reward_config.angle_reward_scale
+                             * jp.sum(jp.square(angle_error)) / self.mjx_model.nv))
+    return angle_reward, -ctrl_cost
 
   def _get_hl_obs(self, data: mjx.Data, info: Dict) -> jp.ndarray:
     """Get observations for the high-level policy."""
-    ref_qpos = info.get('ref_qpos', jp.zeros_like(data.qpos))  # Get ref info if available
-    ref_qvel = info.get('ref_qvel', jp.zeros_like(data.qvel))
     return jp.concatenate([
       data.qpos,
       data.qvel,
-      ref_qpos,  # Include reference state
-      ref_qvel
+      info['qpos_ref'],
+      info['qvel_ref']
     ])
 
   def _get_ll_obs(self, data, info):
@@ -303,7 +303,6 @@ class MjxHand(HierarchicalEnv):
     # Example: proprioceptive info relevant for muscle control
     return jp.concatenate([
       data.qpos,
-      data.qvel,
     ])
 
   def get_ref_qpos_qvel(self, info):

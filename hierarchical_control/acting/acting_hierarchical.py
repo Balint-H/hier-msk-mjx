@@ -60,9 +60,9 @@ def actor_step(
           ),
           LLSupervisedData(
             ll_obs= mid_state.obs,
-            activation_designated= actions,
+            # activation_designated= actions,
             hl_desired_torque= mid_state.info['desired_torque'],
-            torque_designated= nstate.info['actual_torque'],
+            torque_designated= nstate.info['designated_torque'],
             # Pre-computed Jacobian: d(torque)/d(act)
             jacobian= nstate.info['jac_torque_act']
             )

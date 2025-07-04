@@ -259,7 +259,7 @@ class MjxHand(HierarchicalEnv):
     rewards = self._get_reward(state.info['desired_torque'], next_data.qpos, qpos_ref_t)
 
     # Prepare next observations for HL controller
-    next_info_for_obs = {'ref_qpos': qpos_ref_t, 'ref_qvel': qvel_ref_t}
+    next_info_for_obs = {'qpos_ref': qpos_ref_t, 'qvel_ref': qvel_ref_t}
     state.obs['hl_obs'] = self._get_hl_obs(next_data, next_info_for_obs)
 
     # Update metrics
